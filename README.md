@@ -1,6 +1,8 @@
 # I Set ~$40 on Fire in 85 Minutes — on One GPU Bug
 
 > **Live article:** https://amitpandeytiktok.github.io/the-40-dollar-gpu-bug/
+>
+> **Watch (2 min):** [the-40-dollar-gpu-bug.mp4](the-40-dollar-gpu-bug.mp4) · **Script:** [video_script.md](video_script.md) · **Build it:** [make_video.py](make_video.py)
 
 Twelve A100s. Eighty-five minutes. A 14-billion-parameter video model. **Zero clips saved.**
 This is the honest autopsy of a spectacularly dumb render failure — and the six-line checklist
