@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>I Set $40 on Fire in 85 Minutes — on ONE GPU Bug</title>
+<meta name="description" content="A brutally honest post-mortem: how a single VAE out-of-memory error plus a fail-fast batch nuked a 12-GPU render and burned ~$40 for zero output — and the 6 guardrails that stop it from ever happening again.">
+<meta property="og:type" content="article">
+<meta property="og:title" content="I Set $40 on Fire in 85 Minutes — on ONE GPU Bug">
+<meta property="og:description" content="One VAE OOM at the very last step + a fail-fast batch = 12 A100s, 85 minutes, ~$40, and zero clips saved. Here's the autopsy and the checklist that prevents it.">
+<style>
+ :root{--bg:#0d1117;--panel:#161b22;--panel2:#1c2230;--border:#30363d;--txt:#e6edf3;
+   --dim:#8b949e;--accent:#58a6ff;--green:#3fb950;--yellow:#e3b341;--red:#f85149;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+ *{box-sizing:border-box}
+ body{margin:0;background:var(--bg);color:var(--txt);
+   font:16px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+ .wrap{max-width:760px;margin:0 auto;padding:48px 20px 96px}
+ .kicker{color:var(--red);font-weight:700;letter-spacing:.08em;text-transform:uppercase;font-size:13px}
+ h1{font-size:38px;line-height:1.15;margin:.3em 0 .2em}
+ h2{font-size:24px;margin:2em 0 .4em;border-bottom:1px solid var(--border);padding-bottom:.3em}
+ h3{font-size:18px;margin:1.6em 0 .3em;color:var(--accent)}
+ .lede{font-size:19px;color:var(--dim);margin:.6em 0 1.4em}
+ .byline{color:var(--dim);font-size:14px;margin-bottom:30px}
+ a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
+ code{font-family:var(--mono);background:#21262d;padding:.15em .4em;border-radius:5px;font-size:.88em}
+ pre{background:#0a0d12;border:1px solid var(--border);border-radius:10px;padding:16px 18px;
+   overflow-x:auto;font-family:var(--mono);font-size:13.5px;line-height:1.55}
+ pre .c{color:var(--dim)} pre .r{color:var(--red)} pre .g{color:var(--green)} pre .y{color:var(--yellow)}
+ .receipt{background:linear-gradient(180deg,#1c1206,#160d04);border:1px solid #5c3b12;border-radius:14px;
+   padding:22px 24px;margin:26px 0}
+ .receipt .big{font-size:46px;font-weight:800;color:var(--yellow);line-height:1}
+ .receipt .row{display:flex;justify-content:space-between;border-bottom:1px dashed #5c3b12;padding:7px 0;font-family:var(--mono);font-size:14px}
+ .receipt .row:last-child{border-bottom:0}
+ .tl{list-style:none;padding:0;margin:18px 0}
+ .tl li{position:relative;padding:0 0 16px 26px;border-left:2px solid var(--border);margin-left:6px}
+ .tl li::before{content:"";position:absolute;left:-7px;top:3px;width:12px;height:12px;border-radius:50%;background:var(--accent)}
+ .tl li.bad::before{background:var(--red)} .tl li.bad{border-left-color:var(--red)}
+ .tl b{color:var(--txt)} .tl span{color:var(--dim)}
+ .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:18px 20px;margin:14px 0}
+ .card h3{margin-top:0}
+ .num{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:50%;
+   background:var(--accent);color:#06101f;font-weight:800;margin-right:10px;flex:0 0 auto}
+ .gd{display:flex;align-items:flex-start;gap:6px;margin:0 0 10px}
+ .check{background:#0d1f12;border:1px solid #1d5c2e;border-radius:12px;padding:18px 22px;margin:18px 0}
+ .check label{display:block;padding:6px 0;color:var(--txt)}
+ .check input{margin-right:10px;accent-color:var(--green)}
+ blockquote{border-left:4px solid var(--accent);margin:24px 0;padding:6px 18px;color:var(--txt);
+   font-size:20px;background:var(--panel)}
+ .tag{display:inline-block;background:#21262d;border:1px solid var(--border);border-radius:999px;
+   padding:3px 11px;font-size:12px;color:var(--dim);margin:2px 4px 2px 0;font-family:var(--mono)}
+ hr{border:0;border-top:1px solid var(--border);margin:40px 0}
+ footer{color:var(--dim);font-size:14px;text-align:center;margin-top:50px}
+ .red{color:var(--red)} .grn{color:var(--green)} .yel{color:var(--yellow)} .dim{color:var(--dim)}
+</style></head>
+<body><div class="wrap">
+
+<div class="kicker">⟶ Build-in-public post-mortem</div>
+<h1>I Set <span class="yel">$40</span> on Fire in 85 Minutes — on <span class="red">One</span> GPU Bug</h1>
+<p class="lede">Twelve A100s. Eighty-five minutes. A 14-billion-parameter video model. Zero clips
+saved. Here's the autopsy of a spectacularly dumb render failure — and the six-line
+checklist that makes sure neither of us ever pays for it twice.</p>
+<div class="byline">A real incident from an AI song-video pipeline · written up the same afternoon it happened</div>
+
+<div class="receipt">
+  <div class="dim" style="font-family:var(--mono);font-size:13px">MODAL · INVOICE FOR NOTHING</div>
+  <div class="big">≈ $40.00</div>
+  <div style="margin:14px 0 4px">
+    <div class="row"><span>12 × A100-80GB · ~1.4 h each</span><span>$2.50 / GPU-hr</span></div>
+    <div class="row"><span>40/40 diffusion steps completed</span><span class="grn">✓ paid in full</span></div>
+    <div class="row"><span>VAE decode (the last step)</span><span class="red">✗ OOM</span></div>
+    <div class="row"><span>Clips delivered</span><span class="red">0 / 12</span></div>
+    <div class="row"><b>Net result</b><b class="red">$40 → /dev/null</b></div>
+  </div>
+</div>
+
+<p>I make music and AI music-videos. The render in question was <b>SWAAHA</b> — a cinematic
+image-to-video pass: 12 keyframes → 12 animated clips via <b>Wan2.2 I2V-A14B</b> on
+<a href="https://modal.com">Modal</a>, fanned out across 12 <b>A100-80GB</b> GPUs so they'd
+all finish in roughly the wall-time of a single clip.</p>
+
+<p>The math is seductive: parallel = fast. The footnote nobody reads: <b>parallel also means
+you can waste money twelve ways at once.</b></p>
+
+<h2>The timeline</h2>
+<ul class="tl">
+  <li><b>12:00</b> — <span>Kick off <code>render.starmap()</code>. 12 containers spin up cold, each downloads the ~60–80&nbsp;GB model.</span></li>
+  <li><b>12:40</b> — <span>Sampling begins. tqdm bars crawl forward at ~71&nbsp;s/step, 40 steps to go.</span></li>
+  <li><b>13:25</b> — <span><b>40/40 steps done on every clip.</b> The expensive part is <i>finished</i>. I'm mentally already editing the video.</span></li>
+  <li class="bad"><b>13:26</b> — <span><b class="red">CUDA out of memory</b> — inside the VAE decoder, on the very last operation: turning the finished latents into actual pixels.</span></li>
+  <li class="bad"><b>13:26</b> — <span>That single exception trips <code>starmap</code>'s fail-fast. <b>All 11 healthy containers get a cancel signal mid-flight.</b></span></li>
+  <li class="bad"><b>13:26</b> — <span><code>0 clips saved</code>. Eighty-five minutes of GPU time, gone, with nothing on disk.</span></li>
+</ul>
+
+<h2>Bug #1 — the memory cliff is at the <em>end</em>, not the middle</h2>
+<p>Everyone benchmarks whether sampling fits in VRAM. It did — comfortably, for all 40 steps.
+But a <b>video</b> VAE decodes <i>all 81 frames at once</i>, and that decode is the single most
+memory-hungry moment in the whole pipeline. It only happens <b>after</b> you've already paid for
+sampling. So the model sailed through the costly 99% and faceplanted on the final 1%:</p>
+
+<pre><span class="c"># diffusers/models/autoencoders/autoencoder_kl_wan.py</span>
+<span class="r">OutOfMemoryError</span>: CUDA out of memory. Tried to allocate 1.32 GiB.
+GPU 0 has a total capacity of 79.25 GiB of which <span class="y">1.06 GiB is free</span>.
+Process 1 has 78.18 GiB memory in use.</pre>
+
+<p>1.32&nbsp;GiB short. On an 80&nbsp;GB card. At the finish line. The fix is one of the oldest
+tricks in the book — decode in <b>tiles</b> and <b>frame slices</b> so peak memory stays bounded:</p>
+
+<pre>  pipe.to("cuda")
+<span class="g">+ # the VAE decode of 81 frames @720p peaks &gt;80GB — tile + slice it</span>
+<span class="g">+ pipe.vae.enable_tiling()</span>
+<span class="g">+ pipe.vae.enable_slicing()</span></pre>
+
+<p>Plus a fragmentation guard, because "1.06&nbsp;GiB free but can't allocate 1.32" screams
+fragmentation: <code>PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True</code>.</p>
+
+<h2>Bug #2 — one death sentenced eleven innocents</h2>
+<p>Here's the part that turned an <i>annoying</i> bug into an <i>expensive</i> one. The batch was a
+plain fan-out:</p>
+
+<pre><span class="r">for</span> out_p, data <span class="r">in</span> zip(todo, render.starmap(args)):   <span class="c"># fail-fast</span>
+    out_p.write_bytes(data)</pre>
+
+<p><code>starmap</code> defaults to <b>fail-fast</b>: the instant any one input raises, the whole map
+is cancelled and the exception propagates. So clip&nbsp;#7's OOM didn't just lose clip&nbsp;#7 —
+it sent <code>Successfully canceled input</code> to the eleven clips that were seconds from done.
+<b>Eleven healthy renders, executed and abandoned.</b> The fix is one keyword:</p>
+
+<pre><span class="g">+ # one clip's failure must NEVER cancel the others</span>
+ok = 0
+<span class="r">for</span> out_p, data <span class="r">in</span> zip(todo, render.starmap(args, <span class="g">return_exceptions=True</span>)):
+    <span class="r">if</span> isinstance(data, Exception):
+        print(<span class="y">f"FAILED {out_p.name}: {data}"</span>); <span class="r">continue</span>
+    out_p.write_bytes(data); ok += 1                <span class="c"># save the survivors</span></pre>
+
+<p>With <code>return_exceptions=True</code>, a single OOM would have cost me <b>1</b> clip, not 12.
+Same bug, <span class="grn">~$3 of damage instead of ~$40.</span></p>
+
+<h2>Why this was genuinely foolish (not just unlucky)</h2>
+<p>Bad luck is the GPU dying. This wasn't luck — it was four avoidable decisions stacked on top of
+each other:</p>
+<div class="card">
+  <p><b>I scaled <span class="red">before</span> I validated.</b> I sent twelve $3 jobs to find a bug
+  that a single $3 job would have surfaced. The failure lived in the cheapest-to-test, last-to-run
+  part of the pipeline — the perfect candidate for a smoke test, and I skipped it because the code
+  "looked done."</p>
+  <p><b>I collected results at the end.</b> Nothing was written until everything finished, so a
+  late failure had maximum blast radius. Stream results to disk and there's nothing to lose.</p>
+  <p><b>I never put a number on the downside.</b> <code>12 × $2.50 × 1.4h ≈ $42</code> is a
+  ten-second calculation I did <i>after</i> the fact instead of before.</p>
+</div>
+
+<h2>The 6 guardrails (steal these)</h2>
+
+<div class="gd"><span class="num">1</span><div><h3 style="margin-top:4px">Canary before you fan out</h3>
+Run <b>one</b> unit end-to-end — including the last step — before launching N. A <code>--limit 1</code>
+flag is the highest-ROI line of code in any batch job.</div></div>
+
+<div class="gd"><span class="num">2</span><div><h3 style="margin-top:4px">Find the peak-memory moment, not the average</h3>
+For video/image diffusion that's the <b>VAE decode</b>, and it's at the end. <code>enable_tiling()</code>
++ <code>enable_slicing()</code> by default; test at your real resolution and frame count.</div></div>
+
+<div class="gd"><span class="num">3</span><div><h3 style="margin-top:4px">Isolate failures in any fan-out</h3>
+<code>return_exceptions=True</code> (Modal) / <code>return_exceptions=True</code> (asyncio.gather) /
+<code>--keep-going</code>. One unit's death must never cancel the swarm.</div></div>
+
+<div class="gd"><span class="num">4</span><div><h3 style="margin-top:4px">Save incrementally &amp; make it resumable</h3>
+Write each result the instant it lands. Re-running should <b>skip</b> finished work, so a crash
+costs minutes, not the whole batch.</div></div>
+
+<div class="gd"><span class="num">5</span><div><h3 style="margin-top:4px">Do the cost math out loud — first</h3>
+<code>$/GPU-hr × parallelism × wall-time</code>. Say the number before you hit enter. Set a spend cap
+and an alert so the platform stops you when you won't stop yourself.</div></div>
+
+<div class="gd"><span class="num">6</span><div><h3 style="margin-top:4px">Pay the cold-start tax once</h3>
+Twelve cold containers each re-downloaded the same 60–80&nbsp;GB model — that's most of the bill.
+Cache weights in a shared <b>Volume</b> (and bake into the image) once, then scale out warm.</div></div>
+
+<blockquote>The cheapest place to find a bug is a <b>$2 canary</b>, not a <b>$40 swarm</b>.
+Test the last mile first.</blockquote>
+
+<h2>The receipt, rewritten</h2>
+<p>The model is now cached in the Volume, the decode is tiled, and the batch saves survivors.
+The exact same render, redone correctly, costs about <b class="grn">$25 for all twelve clips</b> —
+or <b class="grn">$2–4 to prove it on one</b> before committing. The bug is fixed in four lines.
+The <i>lesson</i> is the asset; the $40 was just tuition.</p>
+
+<div class="check">
+  <b>Pre-flight checklist for expensive batch jobs</b>
+  <label><input type="checkbox"> Smoke-tested ONE unit end-to-end (incl. the final step)</label>
+  <label><input type="checkbox"> Verified peak memory at real resolution / length</label>
+  <label><input type="checkbox"> Fan-out isolates failures (<code>return_exceptions</code> / keep-going)</label>
+  <label><input type="checkbox"> Results saved incrementally; re-run skips finished work</label>
+  <label><input type="checkbox"> Said the cost number out loud; spend cap + alert set</label>
+  <label><input type="checkbox"> Heavy assets cached/warmed once, not per-worker</label>
+</div>
+
+<p><span class="tag">#modal</span><span class="tag">#gpu</span><span class="tag">#mlops</span>
+<span class="tag">#diffusers</span><span class="tag">#wan2.2</span><span class="tag">#postmortem</span>
+<span class="tag">#buildinpublic</span></p>
+
+<hr>
+<footer>
+  Written in public, the afternoon it happened. If it saved you a render, it paid for itself.<br>
+  Mistakes are cheaper when you publish them. ◦
+</footer>
+
+</div></body></html>
